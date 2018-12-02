@@ -69,35 +69,54 @@ class FossologyProcessor extends BaseHandler {
     })
   }
 
-  async _runCopyrights(request, files) {
-    const parameters = ['-J']
-    const copyrightOutput = []
+  async _visitFiles(files, runner) {
+    const results = []
     for (const file of files) {
       if (file) {
         try {
-          const copyright = await this._runCopyright(request, path, parameters)
-          if (copyright) copyrightOutput.push({ path: file, copyright: JSON.parse(copyright) })
+          const output = await runner(path)
+          if (output) results.push({ path: file, output: JSON.parse(output) })
         } catch (error) {
           this.logger.error(error)
         }
       }
     }
-    return {
-      version: await this._copyrightVersion,
-      parameters,
-      output: {
-        contentType: 'application/json',
-        content: copyrightOutput
-      }
-    }
+    return { output: { contentType: 'application/json', content: results } }
   }
 
-  _runCopyright(request, file, parameters) {
+  async _runCopyrights(request, files) {
+    const result = await this._visitFiles(files, path => this._runCopyright(request, path))
+    result.version = await this._copyrightVersion
+    return result
+  }
+
+  _runCopyright(request, file) {
     return new Promise((resolve, reject) => {
-      const params = ['--files', file, ...parameters].join(' ')
-      exec(`cd ${this.options.installDir}/copyright/agent && ./copyright ${params}`, (error, stdout) => {
+      const parameters = ['--files', file, '-J'].join(' ')
+      exec(`cd ${this.options.installDir}/copyright/agent && ./copyright ${parameters}`, (error, stdout) => {
         if (error) {
           request.markDead('Error', error ? error.message : 'FOSSology copyright run failed')
+          return reject(error)
+        }
+        resolve(stdout)
+      })
+    })
+  }
+
+  async _runMonkOnFiles(request, files) {
+    const result = await this._visitFiles(files, path => this._runMonk(request, path))
+    result.version = await this._monkVersion
+    return result
+  }
+
+  _runMonk(request, file) {
+    // TODO figure out where to get a license file. May have to be created at build time
+    const licenseFile = ''
+    return new Promise((resolve, reject) => {
+      const parameters = ['-k', licenseFile, '-J', file].join(' ')
+      exec(`cd ${this.options.installDir}/monk/agent && ./monk ${parameters}`, (error, stdout) => {
+        if (error) {
+          request.markDead('Error', error ? error.message : 'FOSSology monk run failed')
           return reject(error)
         }
         resolve(stdout)
@@ -132,8 +151,9 @@ class FossologyProcessor extends BaseHandler {
       const base = '0.0.0'
       this._nomosVersion = await this._detectNomosVersion()
       this._copyrightVersion = await this._detectCopyrightVersion()
+      this._monkVersion = await this._detectMonkVersion()
       return BaseHandler._aggregateVersions(
-        [this._nomosVersion, this._copyrightVersion],
+        [this._nomosVersion, this._copyrightVersion, this._monkVersion],
         'FOSSology tool version misformatted',
         base
       )
@@ -148,8 +168,17 @@ class FossologyProcessor extends BaseHandler {
       exec(`cd ${this.options.installDir}/nomos/agent && ./nomossa -V`, (error, stdout) => {
         if (error) return reject(error)
         const rawVersion = stdout.replace('nomos build version:', '').trim()
-        _toolVersion = rawVersion.replace(/-.*/, '').trim()
-        resolve(_toolVersion)
+        resolve(rawVersion.replace(/-.*/, '').trim())
+      })
+    })
+  }
+
+  _detectMonkVersion() {
+    return new Promise((resolve, reject) => {
+      exec(`cd ${this.options.installDir}/monk/agent && ./monk -V`, (error, stdout) => {
+        if (error) return reject(error)
+        const rawVersion = stdout.replace('monk version', '').trim()
+        resolve(rawVersion.replace(/-.*/, '').trim())
       })
     })
   }
@@ -172,9 +201,11 @@ class FossologyProcessor extends BaseHandler {
     const files = await getFiles(request.document.location)
     const nomosOutput = await this._runNomos(request)
     const copyrightOutput = await this._runCopyrights(request, files)
+    const monkOutput = await this._runMonk(request, files)
     request.document = { _metadata: request.document._metadata }
     if (nomosOutput) request.document.nomos = nomosOutput
     if (copyrightOutput) request.document.copyright = copyrightOutput
+    if (monkOutput) request.document.monk = monkOutput
   }
 }
 
